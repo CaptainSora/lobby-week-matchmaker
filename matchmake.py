@@ -29,21 +29,14 @@ class Priority(Enum):
 
 
 class Delegate:
-	def __init__(self, deleg_row: pd.DataFrame, select_fn: Callable[[Sequence[T]], T]) -> None:
+	def __init__(self, deleg_row: pd.DataFrame) -> None:
 		self.name: str = deleg_row.at["Name"]
 		self.avail: Dict[str, bool] = {date: deleg_row.at[date] for date in DATES}
 		self.staff: bool = deleg_row.at["Staff?"]
 		self.local: int | None = deleg_row.at["Local #"]
 		self.constituency: str = deleg_row.at["Constituency Name"]
 		self.province: str = deleg_row.at["Province Name"]
-		self.select: Callable[[Sequence[T]], T] = select_fn
-	
-	def assign(self, parl_list: List["Parliamentarian"]) -> None:
-		scores = {i: parl_list[i].score_quality(self) for i in range(len(parl_list))}
-		top_score = max(scores.values())
-		selection = self.select([i for i, score in scores.items() if score == top_score])
-		# Assign to parl
-		parl_list[selection].add_delegate(self, top_score)
+		self.count: int = 0
 
 
 class Parliamentarian:
@@ -63,10 +56,10 @@ class Parliamentarian:
 		self.date_label: str = parl_row.at["date_label"]
 		self.candidates: Dict[str, List[str]] = {k.name: [] for k in Location}
 	
-	def add_delegate(self, delegate: Delegate, score: float) -> None:
+	def add_delegate(self, deleg_name: str, score: float) -> None:
 		if score > 0:
 			enum_value: int = int(len(Location) - score)
-			self.candidates[Location(enum_value).name].append(delegate.name)
+			self.candidates[Location(enum_value).name].append(deleg_name)
 	
 	def num_candidates(self, match_type: Location | None) -> int:
 		num = 0
@@ -201,7 +194,20 @@ class Matchmaker:
 				# Skip if not available
 				if not deleg.avail[date_label]:
 					continue
-				deleg.assign(parl_list)
+				# Allocate delegate to one of the parls in the timeslot
+				scores = {
+					parl_name: self.parl[parl_name].score_quality(deleg)
+					for parl_name in parl_name_list
+				}
+				top_score = max(scores.values())
+				selected_parl = self.rng.choice([
+					parl_name
+					for parl_name, score in scores.items()
+					if score == top_score
+				])
+				self.parl[selected_parl].add_delegate(deleg_name, top_score)
+		# Select delegates out of assigned groupings
+		
 
 	
 	def write(self) -> str:
