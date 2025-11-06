@@ -1,5 +1,6 @@
 from datetime import datetime as dt
 from enum import Enum
+from math import ceil
 from random import Random, randrange
 from typing import Callable, Dict, List, Sequence, TypeVar
 
@@ -18,6 +19,7 @@ class Location(Enum):
 	Local = 0
 	Constituency = 1
 	Province = 2
+	Any = 3
 
 
 class Priority(Enum):
@@ -36,7 +38,8 @@ class Delegate:
 		self.local: int | None = deleg_row.at["Local #"]
 		self.constituency: str = deleg_row.at["Constituency Name"]
 		self.province: str = deleg_row.at["Province Name"]
-		self.count: int = 0
+		self.assigned: List[str] = []
+		self.backup: List[str] = []
 
 
 class Parliamentarian:
@@ -54,29 +57,30 @@ class Parliamentarian:
 		self.req_prov: bool = parl_row.at["Requires province-dweller?"]
 		self.timeslot: dt | None = parl_row.at["timestamp"]
 		self.date_label: str = parl_row.at["date_label"]
-		self.candidates: Dict[str, List[str]] = {k.name: [] for k in Location}
+		self.candidates: Dict[str, List[Delegate]] = {l.name: [] for l in Location}
+		self.assigned: List[(str, Location)] = []
+		self.backup: List[(str, Location)] = []
+		self.staff: List[(str, Location)] = []
 	
-	def add_delegate(self, deleg_name: str, score: float) -> None:
-		if score > 0:
-			enum_value: int = int(len(Location) - score)
-			self.candidates[Location(enum_value).name].append(deleg_name)
+	def add_delegate(self, deleg: Delegate, score: float) -> None:
+		enum_value: int = len(Location) - int(score) - 1
+		self.candidates[Location(enum_value).name].append(deleg)
 	
-	def num_candidates(self, match_type: Location | None) -> int:
+	def num_candidates(self, match_type: Location = Location.Any) -> int:
 		num = 0
 		for loc in Location:
 			num += len(self.candidates[loc.name])
-			if match_type is not None and match_type == loc:
+			if match_type == loc:
 				return num
-		return num
 	
-	def get_priority(self) -> Priority:
-		if self.req_local and self.num_candidates(Location.Local) < 2:
+	def get_priority(self, thresh: int = 2) -> Priority:
+		if self.req_local and self.num_candidates(Location.Local) < thresh:
 			return Priority.Unsat_req_local
-		elif self.req_const and self.num_candidates(Location.Constituency) < 2:
+		elif self.req_const and self.num_candidates(Location.Constituency) < thresh:
 			return Priority.Unsat_req_const
-		elif self.req_prov and self.num_candidates(Location.Province) < 2:
+		elif self.req_prov and self.num_candidates(Location.Province) < thresh:
 			return Priority.Unsat_req_prov
-		elif self.num_candidates(None) < 2:
+		elif self.num_candidates(Location.Any) < thresh:
 			return Priority.Unsatisfied
 		return Priority.Satisfied
 	
@@ -93,26 +97,48 @@ class Parliamentarian:
 			score += 1
 		return score
 	
+	def assign_delegates(self) -> None:
+		delegs = [
+			(deleg, l.value, len(deleg.assigned), len(deleg.backup))
+			for l in Location
+			for deleg in self.candidates[l.name]
+		]
+		delegs.sort(key=lambda x: x[1:])
+		if self.get_priority(thresh=1) != Priority.Satisfied:
+			return
+		for deleg, loc, *_ in delegs[:4]:
+			if len(self.assigned) < 2:
+				self.assigned.append((deleg.name, Location(loc)))
+				deleg.assigned.append(self.name)
+			else:
+				self.backup.append((deleg.name, Location(loc)))
+				deleg.backup.append(self.name)
+	
 	def write(self) -> str:
 		outstrs = []
-		if self.get_priority().value > 0:
+		reqs = ""
+		if self.req_local:
+			reqs = "Requires delegate from a represented Local"
+		elif self.req_const:
+			reqs = "Requires delegate from the same Constituency"
+		elif self.req_prov:
+			reqs = "Requires delegate from the same Province"
+		
+		if self.get_priority(thresh=1) != Priority.Satisfied:
 			outstrs.append(f"{self.name}: Requirements Not Met!")
+			outstrs.append(reqs)
 		else:
-			delegs = [
-				deleg
-				for deleg_list in self.candidates.values()
-				for deleg in deleg_list
-			]
-			outstrs.append(f"{self.name} - {len(delegs)} available candidates")
+			outstrs.append(f"{self.name} - {self.num_candidates()} available candidates")
+			if reqs:
+				outstrs.append(reqs)
 			# Write selected delegates
 			outstrs.append(f"  Delegates:")
-			for deleg in delegs[:2]:
-				outstrs.append(f"    {deleg}")
+			for deleg, loc in self.assigned:
+				outstrs.append(f"    {deleg} - ({loc.name})")
 			# Write backup delegates
-			if len(delegs) > 2:
-				outstrs.append(f"  Backups:")
-				for deleg in delegs[2:4]:
-					outstrs.append(f"    {deleg}")
+			outstrs.append(f"  Backups:")
+			for deleg, loc in self.backup:
+				outstrs.append(f"    {deleg} - ({loc.name})")
 		return '\n'.join(outstrs)
 
 
@@ -163,7 +189,7 @@ class Matchmaker:
 		deleg_data.index = self.rng.sample(range(nrows), k=nrows)
 		deleg_data.sort_index(inplace=True)
 		self.deleg = {
-			row.at["Name"]: Delegate(row, self.rng.choice)
+			row.at["Name"]: Delegate(row)
 			for idx, row in deleg_data.iterrows()
 		}
 
@@ -189,8 +215,7 @@ class Matchmaker:
 			if pd.isnull(timeslot):
 				continue
 			date_label = self.parl[parl_name_list[0]].date_label
-			parl_list = [self.parl[name] for name in parl_name_list]
-			for deleg_name, deleg in self.deleg.items():
+			for deleg in self.deleg.values():
 				# Skip if not available
 				if not deleg.avail[date_label]:
 					continue
@@ -205,10 +230,13 @@ class Matchmaker:
 					for parl_name, score in scores.items()
 					if score == top_score
 				])
-				self.parl[selected_parl].add_delegate(deleg_name, top_score)
+				self.parl[selected_parl].add_delegate(deleg, top_score)
 		# Select delegates out of assigned groupings
-		
-
+		parl_list = [(parl, parl.num_candidates()) for _, parl in self.parl.items()]
+		parl_list.sort(key=lambda x: x[1])
+		for row in parl_list:
+			parl, _ = row
+			parl.assign_delegates()
 	
 	def write(self) -> str:
 		outstrs = []
