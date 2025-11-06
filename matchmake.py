@@ -1,8 +1,7 @@
 from datetime import datetime as dt
 from enum import Enum
-from math import ceil
 from random import Random, randrange
-from typing import Callable, Dict, List, Sequence, TypeVar
+from typing import Dict, List, TypeVar
 
 import pandas as pd
 
@@ -13,9 +12,17 @@ T = TypeVar("T")
 ### UPDATE AS NEEDED
 CUR_YEAR = 2025
 DATES = ["Nov 24", "Nov 25", "Nov 26", "Nov 27"]
+### UPDATE AS NEEDED
+
+
+def to_timestr(timestamp: dt) -> str:
+	"""Converts a datetime object into a human-readable format."""
+	return timestamp.strftime("%b %d, %I:%M%p").replace(" 0", " ")
 
 
 class Location(Enum):
+	"""Represents the geographic location shared between a Delegate and a
+	Parliamentarian."""
 	Local = 0
 	Constituency = 1
 	Province = 2
@@ -23,6 +30,8 @@ class Location(Enum):
 
 
 class Priority(Enum):
+	"""Orders the needs of a Parliamentarian given the candidate Delegates
+	already assigned to them."""
 	Satisfied = 0
 	Unsatisfied = 1
 	Unsat_req_prov = 2
@@ -40,6 +49,20 @@ class Delegate:
 		self.province: str = deleg_row.at["Province Name"]
 		self.assigned: List[str] = []
 		self.backup: List[str] = []
+	
+	def write(self) -> str:
+		outstrs = [self.name]
+		if not self.assigned and not self.backup:
+			outstrs.append("  Not assigned to any parliamentarian")
+		if self.assigned:
+			outstrs.append(f"  Assigned to: ({len(self.assigned)})")
+			for parl in self.assigned:
+				outstrs.append(f"    {parl}")
+		if self.backup:
+			outstrs.append(f"  Backup for: ({len(self.backup)})")
+			for parl in self.backup:
+				outstrs.append(f"    {parl}")
+		return '\n'.join(outstrs)
 
 
 class Parliamentarian:
@@ -109,10 +132,10 @@ class Parliamentarian:
 		for deleg, loc, *_ in delegs[:4]:
 			if len(self.assigned) < 2:
 				self.assigned.append((deleg.name, Location(loc)))
-				deleg.assigned.append(self.name)
+				deleg.assigned.append(f"{self.name} ({to_timestr(self.timeslot)})")
 			else:
 				self.backup.append((deleg.name, Location(loc)))
-				deleg.backup.append(self.name)
+				deleg.backup.append(f"{self.name} ({to_timestr(self.timeslot)})")
 	
 	def write(self) -> str:
 		outstrs = []
@@ -241,6 +264,7 @@ class Matchmaker:
 	def write(self) -> str:
 		outstrs = []
 		outstrs.append(f"Random seed: {self.seed}\n")
+		outstrs.append("=" * 80 + "\n")
 		for timeslot, parl_name_list in self.timeslots.items():
 			# Timeslot not assigned
 			if pd.isnull(timeslot):
@@ -249,10 +273,14 @@ class Matchmaker:
 					outstrs.append(f"  {parl_name}")
 				continue
 			# Timeslot assigned
-			outstrs.append(f"{timeslot} - ({len(parl_name_list)})")
+			outstrs.append(f"{to_timestr(timeslot)} - ({len(parl_name_list)})")
 			for parl_name in parl_name_list:
-				outstrs.append(self.parl[parl_name].write())
-			outstrs.append("")
+				outstrs.append(self.parl[parl_name].write() + "\n")
+
+		outstrs.append("\n" + "=" * 80 + "\n")
+
+		for deleg in self.deleg.values():
+			outstrs.append(deleg.write() + "\n")
 		
 		filename = f"output_{dt.now().strftime('%Y%m%d_%H%M%S')}.txt"
 		with open(filename, 'w') as f:
