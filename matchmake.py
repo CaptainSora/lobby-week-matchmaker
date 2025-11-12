@@ -1,19 +1,21 @@
-from datetime import datetime as dt
-from enum import Enum
-from random import Random, randrange
-# from typing import TypeVar
 import csv
+from datetime import datetime as dt
+from datetime import timedelta
+from enum import Enum
+from itertools import product
+from random import Random, randrange
 
 import pandas as pd
-
-# Define generic type, used for type hinting only
-# T = TypeVar("T")
-
 
 ### UPDATE AS NEEDED
 CUR_YEAR = 2025
 DATES = ["Nov 24", "Nov 25", "Nov 26", "Nov 27"]
+
 ### UPDATE AS NEEDED
+NUM_ASSIGNEES = 2
+NUM_BACKUPS = 2
+NUM_STAFF = 1
+NUM_STAFF_BACKUPS = 1
 
 
 def to_timestr(timestamp: dt) -> str:
@@ -49,8 +51,24 @@ class Delegate:
 		self.local: int | None = deleg_row.at["Local #"]
 		self.constituency: str = deleg_row.at["Constituency Name"]
 		self.province: str = deleg_row.at["Province Name"]
-		self.assigned: list[str] = []
-		self.backup: list[str] = []
+		self.assigned: list[tuple[str, dt]] = []
+		self.backup: list[tuple[str, dt]] = []
+
+	def assign_to(self, parl_name: str, timeslot: dt) -> None:
+		self.assigned.append((parl_name, timeslot))
+	
+	def backup_for(self, parl_name: str, timeslot: dt) -> None:
+		self.backup.append((parl_name, timeslot))
+
+	def is_available(self, timeslot: dt) -> bool:
+		datestr = timeslot.strftime("%b %d").replace(" 0", " ")
+		if self.avail[datestr]:
+			booked_slots = [item[1] for item in self.assigned + self.backup]
+			return not any([
+				abs(booked - timeslot) < timedelta(hours=1)
+				for booked in booked_slots
+			])
+		return False
 	
 	def write(self) -> str:
 		outstrs = [self.name]
@@ -87,10 +105,35 @@ class Parliamentarian:
 		self.assigned: list[tuple[Delegate, Location]] = []
 		self.backup: list[tuple[Delegate, Location]] = []
 		self.staff: list[tuple[Delegate, Location]] = []
+		self.staff_backup: list[tuple[Delegate, Location]] = []
 	
 	def add_delegate(self, deleg: Delegate, score: float) -> None:
 		enum_value: int = len(Location) - int(score) - 1
 		self.candidates[Location(enum_value).name].append(deleg)
+
+	def new_add_delegate(self, deleg: Delegate, score: float, staff: bool, backup: bool) -> None:
+		enum_value: int = len(Location) - int(score) - 1
+		loc = Location(enum_value)
+		# Add to deleg
+		if backup:
+			deleg.backup_for(self.name, self.timeslot)
+		else:
+			deleg.assign_to(self.name, self.timeslot)
+		# Add to parl
+		if not staff:
+			if backup:
+				self.backup.append([deleg, loc])
+				return len(self.backup) >= NUM_BACKUPS
+			else:
+				self.assigned.append([deleg, loc])
+				return len(self.assigned) >= NUM_ASSIGNEES
+		else:
+			if backup:
+				self.staff_backup.append([deleg, loc])
+				return len(self.staff_backup) >= NUM_STAFF_BACKUPS
+			else:
+				self.staff.append([deleg, loc])
+				return len(self.staff) >= NUM_STAFF
 	
 	def num_candidates(self, match_type: Location = Location.Any) -> int:
 		num = 0
@@ -99,7 +142,7 @@ class Parliamentarian:
 			if match_type == loc:
 				return num
 	
-	def get_priority(self, thresh: int = 2) -> Priority:
+	def get_priority(self, thresh: int = NUM_ASSIGNEES) -> Priority:
 		if self.req_local and self.num_candidates(Location.Local) < thresh:
 			return Priority.Unsat_req_local
 		elif self.req_const and self.num_candidates(Location.Constituency) < thresh:
@@ -109,6 +152,16 @@ class Parliamentarian:
 		elif self.num_candidates(Location.Any) < thresh:
 			return Priority.Unsatisfied
 		return Priority.Satisfied
+	
+	def get_reqs(self) -> Priority:
+		if self.req_local:
+			return Priority.Unsat_req_local
+		elif self.req_const:
+			return Priority.Unsat_req_const
+		elif self.req_prov:
+			return Priority.Unsat_req_prov
+		else:
+			return Priority.Unsatisfied
 	
 	def score_quality(self, deleg: Delegate) -> float:
 		# Assumes the delegate is available to meet the parliamentarian
@@ -132,8 +185,8 @@ class Parliamentarian:
 		delegs.sort(key=lambda x: x[1:])
 		if self.get_priority(thresh=1) != Priority.Satisfied:
 			return
-		for deleg, loc, *_ in delegs[:4]:
-			if len(self.assigned) < 2:
+		for deleg, loc, *_ in delegs[:NUM_ASSIGNEES + NUM_BACKUPS]:
+			if len(self.assigned) < NUM_ASSIGNEES:
 				self.assigned.append((deleg, Location(loc)))
 				deleg.assigned.append(f"{self.name} ({to_timestr(self.timeslot)})")
 			else:
@@ -145,28 +198,35 @@ class Parliamentarian:
 		# Add self
 		output.extend([self.name, self.email])
 		# Add assigned delegates
-		for i in range(2):
+		for i in range(NUM_ASSIGNEES):
 			try:
 				deleg = self.assigned[i][0]
 				output.extend([deleg.name, deleg.email])
 			except (IndexError, AttributeError):
 				output.extend(["None", "None"])
 		# Add backup delegates
-		for i in range(2):
+		for i in range(NUM_BACKUPS):
 			try:
 				deleg = self.backup[i][0]
 				output.extend([deleg.name, deleg.email])
 			except (IndexError, AttributeError):
 				output.extend(["None", "None"])
 		# Add staff
-		try:
-			deleg = self.staff[0][0]
-			output.extend([deleg.name, deleg.email])
-		except (IndexError, AttributeError):
-			output.extend(["None", "None"])
+		for i in range(NUM_STAFF):
+			try:
+				deleg = self.staff[i][0]
+				output.extend([deleg.name, deleg.email])
+			except (IndexError, AttributeError):
+				output.extend(["None", "None"])
+		# Add backup staff
+		for i in range(NUM_STAFF_BACKUPS):
+			try:
+				deleg = self.staff_backup[i][0]
+				output.extend([deleg.name, deleg.email])
+			except (IndexError, AttributeError):
+				output.extend(["None", "None"])
 		
 		return tuple(output)
-
 
 	def write(self) -> str:
 		outstrs = []
@@ -245,6 +305,12 @@ class Matchmaker:
 		self.deleg = {
 			row.at["Name"]: Delegate(row)
 			for idx, row in deleg_data.iterrows()
+			if not row["Staff?"]
+		}
+		self.staff = {
+			row.at["Name"]: Delegate(row)
+			for idx, row in deleg_data.iterrows()
+			if row["Staff?"]
 		}
 
 		# Create and store Parliamentarians {name: Parliamentarian}
@@ -261,7 +327,7 @@ class Matchmaker:
 		}
 		self.timeslots[pd.NaT] = parl_data.loc[parl_data["timestamp"].isnull()]["Name"].to_list()
 	
-	def run(self) -> str:
+	def run_deprecated(self) -> None:
 		# Iterate over timeslots, assigning delegates to parliamentarians
 		# Check for delegate availability
 		for timeslot, parl_name_list in self.timeslots.items():
@@ -292,13 +358,45 @@ class Matchmaker:
 			parl, _ = row
 			parl.assign_delegates()
 	
+	def run(self) -> None:
+		# Iterate over timeslots, assigning delegates to parliamentarians
+		# Check for delegate availability
+		for timeslot, parl_name_list in self.timeslots.items():
+			# Skip if timeslot not assigned
+			if pd.isnull(timeslot):
+				continue
+			for s, b in product([False, True], repeat=2):
+				candidates = self.staff if s else self.deleg
+				# Order parls by need
+				parls = [self.parl[name] for name in parl_name_list]
+				parls.sort(key=lambda p: p.get_reqs().value, reverse=True)
+				# Cycle through parls until all satisfied
+				while parls:
+					parl = parls.pop(0)
+					delegs = [
+						(d, parl.score_quality(d), -1 * len(d.assigned), -1 * len(d.backup))
+						for d in candidates.values()
+						if d.is_available(timeslot)
+					]
+					delegs.sort(key=lambda x: x[1:], reverse=True)
+					if delegs:
+						full = parl.new_add_delegate(*delegs[0][:2], staff=s, backup=b)
+						if not full:
+							parls.append(parl)
+	
 	def write(self) -> str:
 		outstrs = []
-		outcsv = [(
-			"Timeslot", "MP/Sen Name", "MP/Sen Email", "Delegate 1", "Delegate 1 Email",
-			"Delegate 2", "Delegate 2 Email", "Backup 1", "Backup 1 Email",
-			"Backup 2", "Backup 2 Email", "Staff", "Staff Email"
-		)]
+		outcsv = []
+		csvheader = ["Timeslot", "MP/Sen Name", "MP/Sen Email"]
+		for i in range(NUM_ASSIGNEES):
+			csvheader.extend([f"Delegate {i+1}", f"Delegate {i+1} email"])
+		for i in range(NUM_BACKUPS):
+			csvheader.extend([f"Backup {i+1}", f"Backup {i+1} email"])
+		for i in range(NUM_STAFF):
+			csvheader.extend([f"Staff {i+1}", f"Staff {i+1} email"])
+		for i in range(NUM_STAFF_BACKUPS):
+			csvheader.extend([f"Staff Backup {i+1}", f"Staff Backup {i+1} email"])
+		
 		outstrs.append(f"Random seed: {self.seed}\n")
 		outstrs.append("=" * 80 + "\n")
 		for timeslot, parl_name_list in self.timeslots.items():
@@ -326,6 +424,7 @@ class Matchmaker:
 		with open(filename + ".txt", "w", encoding="utf-8") as f1:
 			f1.write("\n".join(outstrs))
 		with open(filename + ".csv", "w", newline="", encoding="utf-8") as f2:
+			csv.writer(f2).writerow(csvheader)
 			csv.writer(f2).writerows(outcsv)
 
 
