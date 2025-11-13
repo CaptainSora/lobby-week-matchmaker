@@ -1,7 +1,7 @@
 import csv
 from datetime import datetime as dt
 from datetime import timedelta
-from enum import Enum
+from enum import IntEnum
 from itertools import product
 from random import Random, randrange
 
@@ -23,7 +23,7 @@ def to_timestr(timestamp: dt) -> str:
 	return timestamp.strftime("%a %b %d @ %I:%M %p").replace(" 0", " ")
 
 
-class Location(Enum):
+class Location(IntEnum):
 	"""Represents the geographic location shared between a Delegate and a
 	Parliamentarian."""
 	Local = 0
@@ -32,7 +32,7 @@ class Location(Enum):
 	Any = 3
 
 
-class Priority(Enum):
+class Status(IntEnum):
 	"""Orders the needs of a Parliamentarian given the candidate Delegates
 	already assigned to them."""
 	Satisfied = 0
@@ -76,12 +76,12 @@ class Delegate:
 			outstrs.append("  Not assigned to any parliamentarian")
 		if self.assigned:
 			outstrs.append(f"  Assigned to: ({len(self.assigned)})")
-			for parl in self.assigned:
-				outstrs.append(f"    {parl}")
+			for parl_name, timestamp in self.assigned:
+				outstrs.append(f"    {parl_name} - {to_timestr(timestamp)}")
 		if self.backup:
 			outstrs.append(f"  Backup for: ({len(self.backup)})")
-			for parl in self.backup:
-				outstrs.append(f"    {parl}")
+			for parl_name, timestamp in self.backup:
+				outstrs.append(f"    {parl_name} - {to_timestr(timestamp)}")
 		return '\n'.join(outstrs)
 
 
@@ -101,24 +101,29 @@ class Parliamentarian:
 		self.req_prov: bool = parl_row.at["Requires province-dweller?"]
 		self.timeslot: dt | None = parl_row.at["timestamp"]
 		self.date_label: str = parl_row.at["date_label"]
-		self.candidates: dict[str, list[Delegate]] = {l.name: [] for l in Location}
+		# Assignees
 		self.assigned: list[tuple[Delegate, Location]] = []
 		self.backup: list[tuple[Delegate, Location]] = []
 		self.staff: list[tuple[Delegate, Location]] = []
 		self.staff_backup: list[tuple[Delegate, Location]] = []
-	
-	def add_delegate(self, deleg: Delegate, score: float) -> None:
-		enum_value: int = len(Location) - int(score) - 1
-		self.candidates[Location(enum_value).name].append(deleg)
+		# Current state
+		self.status = Status.Unsatisfied
+		if self.req_local:
+			self.status = Status.Unsat_req_local
+		elif self.req_const:
+			self.status = Status.Unsat_req_const
+		elif self.req_prov:
+			self.status = Status.Unsat_req_prov
 
-	def new_add_delegate(self, deleg: Delegate, score: float, staff: bool, backup: bool) -> None:
-		enum_value: int = len(Location) - int(score) - 1
-		loc = Location(enum_value)
+	def new_add_delegate(self, deleg: Delegate, loc: Location, staff: bool, backup: bool) -> None:
 		# Add to deleg
 		if backup:
 			deleg.backup_for(self.name, self.timeslot)
 		else:
 			deleg.assign_to(self.name, self.timeslot)
+		# Update state
+		if len(Status) - loc.value >= self.status.value:
+			self.status = Status.Satisfied
 		# Add to parl
 		if not staff:
 			if backup:
@@ -135,96 +140,35 @@ class Parliamentarian:
 				self.staff.append([deleg, loc])
 				return len(self.staff) >= NUM_STAFF
 	
-	def num_candidates(self, match_type: Location = Location.Any) -> int:
-		num = 0
-		for loc in Location:
-			num += len(self.candidates[loc.name])
-			if match_type == loc:
-				return num
-	
-	def get_priority(self, thresh: int = NUM_ASSIGNEES) -> Priority:
-		if self.req_local and self.num_candidates(Location.Local) < thresh:
-			return Priority.Unsat_req_local
-		elif self.req_const and self.num_candidates(Location.Constituency) < thresh:
-			return Priority.Unsat_req_const
-		elif self.req_prov and self.num_candidates(Location.Province) < thresh:
-			return Priority.Unsat_req_prov
-		elif self.num_candidates(Location.Any) < thresh:
-			return Priority.Unsatisfied
-		return Priority.Satisfied
-	
-	def get_reqs(self) -> Priority:
-		if self.req_local:
-			return Priority.Unsat_req_local
-		elif self.req_const:
-			return Priority.Unsat_req_const
-		elif self.req_prov:
-			return Priority.Unsat_req_prov
-		else:
-			return Priority.Unsatisfied
-	
-	def score_quality(self, deleg: Delegate) -> float:
+	def score(self, deleg: Delegate) -> Location:
 		# Assumes the delegate is available to meet the parliamentarian
-		# Set fractional quality based on Parliamentarian need
-		score = self.get_priority().value / len(Priority)
 		# Set integral quality based on match quality
 		if self.req_local and deleg.local in self.req_local:
-			score += 3
+			return Location.Local
 		elif self.constituency and self.constituency == deleg.constituency:
-			score += 2
+			return Location.Constituency
 		elif self.province == deleg.province:
-			score += 1
-		return score
-	
-	def assign_delegates(self) -> None:
-		delegs = [
-			(deleg, l.value, len(deleg.assigned), len(deleg.backup))
-			for l in Location
-			for deleg in self.candidates[l.name]
-		]
-		delegs.sort(key=lambda x: x[1:])
-		if self.get_priority(thresh=1) != Priority.Satisfied:
-			return
-		for deleg, loc, *_ in delegs[:NUM_ASSIGNEES + NUM_BACKUPS]:
-			if len(self.assigned) < NUM_ASSIGNEES:
-				self.assigned.append((deleg, Location(loc)))
-				deleg.assigned.append(f"{self.name} ({to_timestr(self.timeslot)})")
-			else:
-				self.backup.append((deleg, Location(loc)))
-				deleg.backup.append(f"{self.name} ({to_timestr(self.timeslot)})")
-	
+			return Location.Province
+		return Location.Any
+
 	def get_contact_info(self) -> tuple[str, ...]:
 		output = []
 		# Add self
 		output.extend([self.name, self.email])
-		# Add assigned delegates
-		for i in range(NUM_ASSIGNEES):
-			try:
-				deleg = self.assigned[i][0]
-				output.extend([deleg.name, deleg.email])
-			except (IndexError, AttributeError):
-				output.extend(["None", "None"])
-		# Add backup delegates
-		for i in range(NUM_BACKUPS):
-			try:
-				deleg = self.backup[i][0]
-				output.extend([deleg.name, deleg.email])
-			except (IndexError, AttributeError):
-				output.extend(["None", "None"])
-		# Add staff
-		for i in range(NUM_STAFF):
-			try:
-				deleg = self.staff[i][0]
-				output.extend([deleg.name, deleg.email])
-			except (IndexError, AttributeError):
-				output.extend(["None", "None"])
-		# Add backup staff
-		for i in range(NUM_STAFF_BACKUPS):
-			try:
-				deleg = self.staff_backup[i][0]
-				output.extend([deleg.name, deleg.email])
-			except (IndexError, AttributeError):
-				output.extend(["None", "None"])
+		groups = [
+			[NUM_ASSIGNEES, self.assigned],
+			[NUM_BACKUPS, self.backup],
+			[NUM_STAFF, self.staff],
+			[NUM_STAFF_BACKUPS, self.staff_backup]
+		]
+		# Add others
+		for limit, source in groups:
+			for i in range(limit):
+				try:
+					deleg: Delegate = source[i][0]
+					output.extend([deleg.name, deleg.email])
+				except (IndexError, AttributeError):
+					output.extend(["None", "None"])
 		
 		return tuple(output)
 
@@ -238,11 +182,11 @@ class Parliamentarian:
 		elif self.req_prov:
 			reqs = "Requires delegate from the same Province"
 		
-		if self.get_priority(thresh=1) != Priority.Satisfied:
+		if self.status != Status.Satisfied:
 			outstrs.append(f"{self.name}: Requirements Not Met!")
 			outstrs.append(reqs)
 		else:
-			outstrs.append(f"{self.name} - {self.num_candidates()} available candidates")
+			outstrs.append(f"{self.name}")
 			if reqs:
 				outstrs.append(reqs)
 			# Write selected delegates
@@ -327,37 +271,6 @@ class Matchmaker:
 		}
 		self.timeslots[pd.NaT] = parl_data.loc[parl_data["timestamp"].isnull()]["Name"].to_list()
 	
-	def run_deprecated(self) -> None:
-		# Iterate over timeslots, assigning delegates to parliamentarians
-		# Check for delegate availability
-		for timeslot, parl_name_list in self.timeslots.items():
-			# Skip if timeslot not assigned
-			if pd.isnull(timeslot):
-				continue
-			date_label = self.parl[parl_name_list[0]].date_label
-			for deleg in self.deleg.values():
-				# Skip if not available
-				if not deleg.avail[date_label]:
-					continue
-				# Allocate delegate to one of the parls in the timeslot
-				scores = {
-					parl_name: self.parl[parl_name].score_quality(deleg)
-					for parl_name in parl_name_list
-				}
-				top_score = max(scores.values())
-				selected_parl = self.rng.choice([
-					parl_name
-					for parl_name, score in scores.items()
-					if score == top_score
-				])
-				self.parl[selected_parl].add_delegate(deleg, top_score)
-		# Select delegates out of assigned groupings
-		parl_list = [(parl, parl.num_candidates()) for _, parl in self.parl.items()]
-		parl_list.sort(key=lambda x: x[1])
-		for row in parl_list:
-			parl, _ = row
-			parl.assign_delegates()
-	
 	def run(self) -> None:
 		# Iterate over timeslots, assigning delegates to parliamentarians
 		# Check for delegate availability
@@ -369,16 +282,16 @@ class Matchmaker:
 				candidates = self.staff if s else self.deleg
 				# Order parls by need
 				parls = [self.parl[name] for name in parl_name_list]
-				parls.sort(key=lambda p: p.get_reqs().value, reverse=True)
+				parls.sort(key=lambda p: p.status.value, reverse=True)
 				# Cycle through parls until all satisfied
 				while parls:
 					parl = parls.pop(0)
 					delegs = [
-						(d, parl.score_quality(d), -1 * len(d.assigned), -1 * len(d.backup))
+						(d, parl.score(d), len(d.assigned), len(d.backup))
 						for d in candidates.values()
 						if d.is_available(timeslot)
 					]
-					delegs.sort(key=lambda x: x[1:], reverse=True)
+					delegs.sort(key=lambda x: x[1:])
 					if delegs:
 						full = parl.new_add_delegate(*delegs[0][:2], staff=s, backup=b)
 						if not full:
